@@ -1,0 +1,206 @@
+---
+title: "Fitness Activity Analysis - Machine Learning (Coursera)"
+author: "Rumy"
+date: "November 19, 2015"
+output: html_document
+---
+
+### Summary
+
+The project involves analysing personal activity data collected from smart bodywear like Jawbone, 
+Nike Fitbit and focus on "how" they do the activity rather than "how much". The data used for this project was collected by a group of enthusiasts and more information is available at their [site](http://groupware.les.inf.puc-rio.br/har). To summarize, six participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions, identified as classes A, B, C, D and E. Class A corresponds to a correct execution of the exercise, and the remaining five classes identify common mistakes while doing thhese exercises.Body movement sensors were used to collect data about the quality of the exercise execution. The goal of this project is to build a  prediction model that predicts correctness of activity as classified by values A thru E (response) based on set of reading from body sensors (predictors).
+
+The steps followed for project was data aquisition, data exploration, data cleansing and finally building and testing the predictive model. The results of the analysis confirm that the model provided by this algorithm achieves a high prediction accuracy (as indicated by several prediction quality indicators).
+
+### Data aquisition
+Training data set can be found on the following URL: [https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv)
+
+Testing data set can be found on the following URL: [https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv)
+
+```{r, echo=TRUE}
+# set seed for reproducibility
+set.seed(12121)
+
+# get url for training and test data 
+trainurl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+testurl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+
+# build function to download files and store in sub dir Data, if they do not exist already
+getdata <- function(datadir = "./Data") { 
+       if (!file.exists(datadir)) {
+     dir.create(datadir)
+     trainUrl <- "http://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+     testUrl <- "http://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+     trainPath <- paste(datadir, "pml-training.csv", sep = "/")
+     testPath <- paste(datadir, "pml-test.csv", sep = "/")
+     download.file(trainUrl, destfile = trainPath)
+     download.file(testUrl, destfile = testPath)     
+           }
+} 
+getdata()    
+ 
+# load training file
+trainraw <- read.csv("./Data/pml-training.csv", header = TRUE, na.strings=c("NA", "#DIV/0!",""))
+testraw <- read.csv("./Data/pml-test.csv", header = TRUE, na.strings=c("NA", "#DIV/0!",""))
+
+# Load relevant packages for the project
+library(caret)
+library(ggplot2)
+library(reshape)
+library(randomForest)
+library(gbm)
+
+# Split training data into train and test (60:40 split)
+inTrain <- createDataPartition(y=trainraw$classe, p=0.6, list=FALSE)
+
+sampletrain <- trainraw[inTrain, ]
+sampletest <- trainraw[-inTrain, ]
+
+```
+
+
+Some aspects of the data upon visual inspection are:
+- file is comma separated
+- quite a few missing(NA) and error (Div/0) values
+- some rows e.g. record ID, user_name and timestamp columns can be eliminated to overfit the model to non relevant variables.
+
+### Data Cleansing
+```{r, echo=TRUE}
+
+# first identify and remove columns with zero variation from training data
+zeroV <- nearZeroVar(sampletrain, saveMetrics = TRUE)
+zerovnames <- rownames(zeroV[zeroV$zeroVar==TRUE, ])
+zerovnames <- names(sampletrain) %in% zerovnames
+sampletrain <- sampletrain[!zerovnames]
+
+# remove columns with > 65% of data missing or with errors
+
+traininterim <- sampletrain 
+for(i in 1:length(sampletrain)) { 
+    if( sum( is.na( sampletrain[, i] ) ) /nrow(sampletrain) >= .65 ) { 
+        for(k in 1:length(traininterim)) {
+            if( length( grep(names(sampletrain[i]), names(traininterim)[k]) ) ==1)  { 
+                #remove col with significant NA's
+                traininterim <- traininterim[ , -k] #Remove that column
+            }   
+        } 
+    }
+}
+
+sampletrain <- traininterim
+rm(traininterim, zeroV, zerovnames)
+
+# remove columns 1 thru 7 which include row id, user name and time stamp data which should not be mixed up with reads from body sensors to predict correctness of exercise form
+
+sampletrain <- sampletrain[, c(-1:-7)]
+
+# eliminate data cleansing on test and testraw datasets
+colt <- colnames(sampletrain)
+coltr <- colnames(sampletrain[, !names(sampletrain) %in% c("classe")])
+sampletest <- sampletest[colt]
+testraw <- testraw[coltr]
+```
+
+### Exploratory Analysis
+Correlation plot shown here tells us that quite a few variables are correlated  
+```{r, fig.width=9, fig.height=7, echo=FALSE}
+plotd1 <- sampletrain[, -53]
+plotd1 <- melt(cor(sampletrain[, -53]))
+
+g <- ggplot(plotd1, aes(X1, X2, fill = value)) + geom_tile() + scale_fill_gradient(low = "green",  high = "blue") + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+g
+
+```
+
+### Train the Model using RandomForest
+
+```{r, echo=TRUE, cache=TRUE}
+# First will use all the variables without running PCA
+
+time1 = proc.time()
+(rfFit1 = train(sampletrain$classe ~ ., method = "rf", data=sampletrain, trControl = trainControl(method="repeatedcv", repeats=1, number=5, classProbs=TRUE), prox=TRUE, importance=TRUE))
+time2 = proc.time()
+(time_taken = time2 - time1)
+print(rfFit1$finalModel)
+```
+
+Now I will try principal component analysis to reduce the number of dimensions, maintain orthogonality and improve performance without sacrificing accuracy
+
+```{r, echo=TRUE, cache=TRUE}
+preProc <- preProcess(sampletrain[,  !names(sampletrain) %in% c("classe")], method="pca", thresh=0.90)
+preProc
+
+trainPCA <- predict(preProc, sampletrain[,!names(sampletrain) %in% c("classe")])
+
+time1 = proc.time()
+(rfFit2 <- train(sampletrain$classe ~ ., method = "rf", data=trainPCA, trControl = trainControl(method="repeatedcv", repeats=1, number=5, classProbs=TRUE ), prox=TRUE))
+time2 = proc.time()
+(time_taken = time2 - time1)
+print(rfFit2$finalModel)
+```
+
+**Random Forest Model Results and Accuracy**
+
+Performance gain with PCA was at the cost of ~ 3% drop in accuracy. Hence I will go with testing the model without using PCA. Also, variable importance analysis plot that displays more insights about the relative importance of variables in the model.
+
+```{r, fig.width=9, fig.height=7, echo=TRUE}
+rfImp <- varImp(rfFit1, scale = FALSE)
+plot(rfImp, top = 30)
+```
+
+**Accuracy with test data from Sample**
+
+```{r, echo=TRUE}
+confusionMatrix(predict(rfFit1, newdata = sampletest), sampletest$classe)
+```
+
+Applying the RandomForest model fit rfFit1 (w/o PCA) to sample test data yeilded pretty good accuracy ~ 99%
+
+### Train the model using Gradient Boosting Machine (gbm)
+To check if can get a reasonable accuracy with much better performance, I will train the model using gbm algorithm on PCA components created earlier, using K fold cross validation of 10 folds. 
+
+```{r, echo=TRUE, cache=TRUE}
+
+time1 = proc.time()
+(gbmFit <- train(sampletrain$classe ~ ., method = "gbm", data=trainPCA, trControl = trainControl(method="repeatedcv", repeats=1, number=10, classProbs=TRUE ), verbose = FALSE))
+time2 = proc.time()
+(time_taken = time2 - time1)
+```
+
+**Boosted Regression Model Results and Accuracy**
+
+```{r, echo=FALSE}
+confusionMatrix(sampletrain$classe, predict(gbmFit, predict(preProc, sampletrain)))
+```
+
+The model is 84% accurate with 10 fold cross validation (K) on sample train data 
+Let's apply the gbm fit on sample test data to get the accuracy
+
+```{r, echo=TRUE}
+confusionMatrix(sampletest$classe, predict(gbmFit, predict(preProc, sampletest)))
+```
+
+Accuracy at 80% on the sample test is pretty close to sample train data which indicates that the model was not overfit.
+However, to predict the outcome from test file (for the second part of the exercise), I will use the more accurate RF model rfFit1 (without PCA).
+
+**Save training model**
+```{r, echo=TRUE}
+save(rfFit1, file="rfFit1.RData")
+```
+
+
+### Apply the RF fit to test file data and write back to local file for submission
+
+```{r, echo=TRUE}
+load(file="rfFit1.RData", verbose=TRUE)
+predfinal <- predict(rfFit1, testraw)
+pml_write_files <- function(x){
+    n = length(x)
+    for(i in 1:n){
+        filename = paste0("problem_id_",i,".txt")
+        write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+    }
+}
+
+pml_write_files(predfinal)
+```
